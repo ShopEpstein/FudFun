@@ -1,15 +1,27 @@
-// GenieRoom — the authoritative shared world.
-// Now with resource nodes, server-validated gathering, and per-player inventory.
-// The server still owns the truth: clients *request* to gather, the server decides.
+// GenieRoom — the authoritative shared world, now with Supabase persistence.
+// Player position + inventory survive server restarts, keyed by a stable client
+// pid. If Supabase env vars aren't set, it runs in memory (no persistence) so
+// the world still works for local/testing without a database.
 
 const { Room } = require("colyseus");
 const { Schema, MapSchema, defineTypes } = require("@colyseus/schema");
+const { createClient } = require("@supabase/supabase-js");
 
 const WORLD = { w: 40, h: 40 };
 const KINDS = ["mana", "herb", "shard"];
 const NODE_COUNT = 28;
 const NODE_MAX = 5;
-const GATHER_COOLDOWN = 400; // ms between gathers, per player (anti-spam)
+const GATHER_COOLDOWN = 400; // ms between gathers per player
+const SAVE_INTERVAL = 5000;  // flush changed players every 5s
+
+// Server-side Supabase client (uses the service-role key, which bypasses RLS).
+// Never expose this key to the browser. No env = persistence disabled.
+const supabase =
+  process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
+    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
+        auth: { persistSession: false },
+      })
+    : null;
 
 // --- synced state ---------------------------------------------------------
 class Player extends Schema {
@@ -20,7 +32,7 @@ class Player extends Schema {
     this.name = "genie";
     this.dir = "down";
     this.skin = 0;
-    this.inv = new MapSchema(); // kind -> count
+    this.inv = new MapSchema();
   }
 }
 defineTypes(Player, {
@@ -50,12 +62,19 @@ defineTypes(WorldState, { players: { map: Player }, nodes: { map: ResourceNode }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const adjacent = (ax, ay, bx, by) => Math.abs(ax - bx) + Math.abs(ay - by) <= 1;
+const invToObj = (inv) => {
+  const o = {};
+  inv.forEach((v, k) => { o[k] = v; });
+  return o;
+};
 
 // --- room -----------------------------------------------------------------
 class GenieRoom extends Room {
   onCreate() {
     this.maxClients = 50;
-    this.lastGather = {}; // sessionId -> timestamp (not synced)
+    this.lastGather = {};
+    this.pidOf = {};       // sessionId -> stable player id
+    this.dirty = new Set(); // sessionIds with unsaved changes
     this.setState(new WorldState());
     this.spawnNodes();
 
@@ -68,11 +87,10 @@ class GenieRoom extends Room {
         p.x = nx;
         p.y = ny;
         if (typeof data.dir === "string") p.dir = data.dir;
+        this.dirty.add(client.sessionId);
       }
     });
 
-    // Gather: validate it's a real node, the player is next to it, it has
-    // resource left, and the player isn't spamming. Only then award it.
     this.onMessage("gather", (client, data) => {
       const p = this.state.players.get(client.sessionId);
       const node = this.state.nodes.get(String(data?.id));
@@ -83,14 +101,16 @@ class GenieRoom extends Room {
       this.lastGather[client.sessionId] = now;
       node.amount -= 1;
       p.inv.set(node.kind, (p.inv.get(node.kind) || 0) + 1);
+      this.dirty.add(client.sessionId);
     });
 
-    // Regen so the world can't be strip-mined to nothing.
+    // resource regen
     this.clock.setInterval(() => {
-      this.state.nodes.forEach((n) => {
-        if (n.amount < NODE_MAX) n.amount += 1;
-      });
+      this.state.nodes.forEach((n) => { if (n.amount < NODE_MAX) n.amount += 1; });
     }, 8000);
+
+    // periodic persistence flush
+    if (supabase) this.clock.setInterval(() => this.flushAll(), SAVE_INTERVAL);
   }
 
   spawnNodes() {
@@ -104,18 +124,67 @@ class GenieRoom extends Room {
     }
   }
 
-  onJoin(client, options) {
+  async onJoin(client, options) {
+    const pid = (options?.pid ? String(options.pid) : client.sessionId).slice(0, 64);
+    this.pidOf[client.sessionId] = pid;
+
     const p = new Player();
-    p.x = Math.floor(Math.random() * WORLD.w);
-    p.y = Math.floor(Math.random() * WORLD.h);
     p.name = (options?.name ? String(options.name) : "genie").slice(0, 16);
     p.skin = Math.floor(Math.random() * 6);
+
+    // restore from the database if this player has been here before
+    let saved = null;
+    if (supabase) {
+      try {
+        const { data } = await supabase
+          .from("players").select("x,y,inv,name").eq("pid", pid).maybeSingle();
+        saved = data || null;
+      } catch (e) {
+        console.error("load failed:", e.message);
+      }
+    }
+
+    if (saved) {
+      p.x = clamp(saved.x | 0, 0, WORLD.w - 1);
+      p.y = clamp(saved.y | 0, 0, WORLD.h - 1);
+      if (saved.name) p.name = saved.name;
+      const inv = saved.inv || {};
+      for (const k of KINDS) if (inv[k]) p.inv.set(k, inv[k]);
+    } else {
+      p.x = Math.floor(Math.random() * WORLD.w);
+      p.y = Math.floor(Math.random() * WORLD.h);
+    }
+
     this.state.players.set(client.sessionId, p);
-    console.log(`${p.name} joined ${this.roomId}`);
+    console.log(`${p.name} joined ${this.roomId}${saved ? " (restored)" : ""}`);
   }
 
-  onLeave(client) {
+  async savePlayer(sessionId) {
+    if (!supabase) return;
+    const p = this.state.players.get(sessionId);
+    const pid = this.pidOf[sessionId];
+    if (!p || !pid) return;
+    try {
+      await supabase.from("players").upsert(
+        { pid, name: p.name, x: p.x, y: p.y, inv: invToObj(p.inv), updated_at: new Date().toISOString() },
+        { onConflict: "pid" }
+      );
+    } catch (e) {
+      console.error("save failed:", e.message);
+    }
+  }
+
+  async flushAll() {
+    const ids = [...this.dirty];
+    this.dirty.clear();
+    for (const id of ids) await this.savePlayer(id);
+  }
+
+  async onLeave(client) {
+    await this.savePlayer(client.sessionId); // final save on disconnect
     delete this.lastGather[client.sessionId];
+    delete this.pidOf[client.sessionId];
+    this.dirty.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
   }
 }

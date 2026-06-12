@@ -45,9 +45,14 @@ class WorldScene extends Phaser.Scene {
     this.spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
 
     const name = (window.prompt("Pick a genie name") || "genie").slice(0, 16);
+
+    // stable id so the server can restore your saved position + inventory
+    let pid = localStorage.getItem("genie_pid");
+    if (!pid) { pid = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random()); localStorage.setItem("genie_pid", pid); }
+
     this.client = new Client(SERVER);
     try {
-      this.room = await this.client.joinOrCreate("genie_world", { name });
+      this.room = await this.client.joinOrCreate("genie_world", { name, pid });
     } catch (e) {
       this.add
         .text(20, 20,
