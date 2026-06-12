@@ -8,7 +8,15 @@ const { GenieRoom } = require("./GenieRoom");
 const port = Number(process.env.PORT || 2567);
 const app = express();
 
-app.use(cors());
+const corsOptions = {
+  origin: process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(",") : "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false,
+};
+app.use(cors(corsOptions));
+// Handle CORS preflight for all routes, including Colyseus matchmaking endpoints
+app.options("*", cors(corsOptions));
 app.use(express.json());
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
