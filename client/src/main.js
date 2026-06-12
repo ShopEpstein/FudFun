@@ -20,7 +20,7 @@ const iso = (cx, cy) => ({ x: (cx - cy) * (TILE_W / 2), y: (cx + cy) * (TILE_H /
 // --- inventory HUD (DOM overlay) ------------------------------------------
 const hud = document.createElement("div");
 hud.style.cssText =
-  "position:fixed;left:12px;top:12px;z-index:10;font-family:ui-monospace,monospace;" +
+  "position:fixed;left:12px;bottom:12px;z-index:10;font-family:ui-monospace,monospace;" +
   "font-size:14px;color:#ecedf5;background:#101220cc;border:1px solid #ffffff22;" +
   "border-radius:10px;padding:8px 12px;backdrop-filter:blur(8px)";
 hud.textContent = "inventory: empty";
