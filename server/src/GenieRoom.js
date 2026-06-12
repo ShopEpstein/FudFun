@@ -12,7 +12,7 @@ const NODE_MAX = 5;
 const GATHER_COOLDOWN = 400;
 const SAVE_INTERVAL = 5000;
 
-const DB_ID = "genies-db";
+const DB_ID = "FudFun-db";
 const COL_ID = "players";
 
 let db = null;
