@@ -1,36 +1,35 @@
-// GenieRoom — the authoritative shared world, now with Supabase persistence.
-// Player position + inventory survive server restarts, keyed by a stable client
-// pid. If Supabase env vars aren't set, it runs in memory (no persistence) so
-// the world still works for local/testing without a database.
+// GenieRoom — authoritative shared world with Appwrite persistence.
+// If Appwrite env vars aren't set, runs in memory (no persistence).
 
 const { Room } = require("colyseus");
 const { Schema, MapSchema, defineTypes } = require("@colyseus/schema");
-const { createClient } = require("@supabase/supabase-js");
+const { Client, Databases, Query, ID } = require("node-appwrite");
 
 const WORLD = { w: 40, h: 40 };
 const KINDS = ["mana", "herb", "shard"];
 const NODE_COUNT = 28;
 const NODE_MAX = 5;
-const GATHER_COOLDOWN = 400; // ms between gathers per player
-const SAVE_INTERVAL = 5000;  // flush changed players every 5s
+const GATHER_COOLDOWN = 400;
+const SAVE_INTERVAL = 5000;
 
-// Server-side Supabase client (uses the service-role key, which bypasses RLS).
-// Never expose this key to the browser. No env = persistence disabled.
-const supabase =
-  process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
-    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
-        auth: { persistSession: false },
-      })
-    : null;
+const DB_ID = "genies-db";
+const COL_ID = "players";
+
+let db = null;
+if (process.env.APPWRITE_ENDPOINT && process.env.APPWRITE_PROJECT && process.env.APPWRITE_KEY) {
+  const client = new Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT)
+    .setKey(process.env.APPWRITE_KEY);
+  db = new Databases(client);
+}
 
 // --- synced state ---------------------------------------------------------
 class Player extends Schema {
   constructor() {
     super();
-    this.x = 0;
-    this.y = 0;
-    this.name = "genie";
-    this.dir = "down";
+    this.x = 0; this.y = 0;
+    this.name = "genie"; this.dir = "down";
     this.skin = 0;
     this.inv = new MapSchema();
   }
@@ -43,10 +42,7 @@ defineTypes(Player, {
 class ResourceNode extends Schema {
   constructor() {
     super();
-    this.x = 0;
-    this.y = 0;
-    this.kind = "mana";
-    this.amount = NODE_MAX;
+    this.x = 0; this.y = 0; this.kind = "mana"; this.amount = NODE_MAX;
   }
 }
 defineTypes(ResourceNode, { x: "number", y: "number", kind: "string", amount: "uint16" });
@@ -62,19 +58,15 @@ defineTypes(WorldState, { players: { map: Player }, nodes: { map: ResourceNode }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const adjacent = (ax, ay, bx, by) => Math.abs(ax - bx) + Math.abs(ay - by) <= 1;
-const invToObj = (inv) => {
-  const o = {};
-  inv.forEach((v, k) => { o[k] = v; });
-  return o;
-};
 
 // --- room -----------------------------------------------------------------
 class GenieRoom extends Room {
   onCreate() {
     this.maxClients = 50;
     this.lastGather = {};
-    this.pidOf = {};       // sessionId -> stable player id
-    this.dirty = new Set(); // sessionIds with unsaved changes
+    this.pidOf = {};
+    this.docIdOf = {};
+    this.dirty = new Set();
     this.setState(new WorldState());
     this.spawnNodes();
 
@@ -84,8 +76,7 @@ class GenieRoom extends Room {
       const nx = clamp(Math.round(Number(data?.x)) || 0, 0, WORLD.w - 1);
       const ny = clamp(Math.round(Number(data?.y)) || 0, 0, WORLD.h - 1);
       if (Math.abs(nx - p.x) + Math.abs(ny - p.y) <= 1) {
-        p.x = nx;
-        p.y = ny;
+        p.x = nx; p.y = ny;
         if (typeof data.dir === "string") p.dir = data.dir;
         this.dirty.add(client.sessionId);
       }
@@ -104,13 +95,11 @@ class GenieRoom extends Room {
       this.dirty.add(client.sessionId);
     });
 
-    // resource regen
     this.clock.setInterval(() => {
       this.state.nodes.forEach((n) => { if (n.amount < NODE_MAX) n.amount += 1; });
     }, 8000);
 
-    // periodic persistence flush
-    if (supabase) this.clock.setInterval(() => this.flushAll(), SAVE_INTERVAL);
+    if (db) this.clock.setInterval(() => this.flushAll(), SAVE_INTERVAL);
   }
 
   spawnNodes() {
@@ -132,13 +121,14 @@ class GenieRoom extends Room {
     p.name = (options?.name ? String(options.name) : "genie").slice(0, 16);
     p.skin = Math.floor(Math.random() * 6);
 
-    // restore from the database if this player has been here before
     let saved = null;
-    if (supabase) {
+    if (db) {
       try {
-        const { data } = await supabase
-          .from("players").select("x,y,inv,name").eq("pid", pid).maybeSingle();
-        saved = data || null;
+        const res = await db.listDocuments(DB_ID, COL_ID, [Query.equal("pid", pid)]);
+        if (res.documents.length > 0) {
+          saved = res.documents[0];
+          this.docIdOf[client.sessionId] = saved.$id;
+        }
       } catch (e) {
         console.error("load failed:", e.message);
       }
@@ -148,8 +138,10 @@ class GenieRoom extends Room {
       p.x = clamp(saved.x | 0, 0, WORLD.w - 1);
       p.y = clamp(saved.y | 0, 0, WORLD.h - 1);
       if (saved.name) p.name = saved.name;
-      const inv = saved.inv || {};
-      for (const k of KINDS) if (inv[k]) p.inv.set(k, inv[k]);
+      try {
+        const inv = JSON.parse(saved.inv || "{}");
+        for (const k of KINDS) if (inv[k]) p.inv.set(k, inv[k]);
+      } catch (_) {}
     } else {
       p.x = Math.floor(Math.random() * WORLD.w);
       p.y = Math.floor(Math.random() * WORLD.h);
@@ -160,15 +152,22 @@ class GenieRoom extends Room {
   }
 
   async savePlayer(sessionId) {
-    if (!supabase) return;
+    if (!db) return;
     const p = this.state.players.get(sessionId);
     const pid = this.pidOf[sessionId];
     if (!p || !pid) return;
+    const data = {
+      pid, name: p.name, x: p.x, y: p.y,
+      inv: JSON.stringify(Object.fromEntries(KINDS.map(k => [k, p.inv.get(k) || 0]))),
+    };
     try {
-      await supabase.from("players").upsert(
-        { pid, name: p.name, x: p.x, y: p.y, inv: invToObj(p.inv), updated_at: new Date().toISOString() },
-        { onConflict: "pid" }
-      );
+      const docId = this.docIdOf[sessionId];
+      if (docId) {
+        await db.updateDocument(DB_ID, COL_ID, docId, data);
+      } else {
+        const doc = await db.createDocument(DB_ID, COL_ID, ID.unique(), data);
+        this.docIdOf[sessionId] = doc.$id;
+      }
     } catch (e) {
       console.error("save failed:", e.message);
     }
@@ -181,9 +180,10 @@ class GenieRoom extends Room {
   }
 
   async onLeave(client) {
-    await this.savePlayer(client.sessionId); // final save on disconnect
+    await this.savePlayer(client.sessionId);
     delete this.lastGather[client.sessionId];
     delete this.pidOf[client.sessionId];
+    delete this.docIdOf[client.sessionId];
     this.dirty.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
   }
