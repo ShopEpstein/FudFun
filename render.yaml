@@ -9,8 +9,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: CLIENT_ORIGIN
-        value: https://fud-fun.vercel.app
       - key: APPWRITE_ENDPOINT
         sync: false
       - key: APPWRITE_PROJECT
