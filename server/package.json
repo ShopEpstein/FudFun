@@ -1,0 +1,21 @@
+{
+  "name": "genies-server",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "colyseus": "0.15.17",
+    "@colyseus/schema": "2.0.29",
+    "@colyseus/ws-transport": "0.15.3",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  }
+}
