@@ -9,17 +9,18 @@ const port = Number(process.env.PORT || 2567);
 const app = express();
 
 app.use(cors());
-
-const server = http.createServer(app);
-
+app.use(express.json());
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-const gameServer = new Server({
-  transport: new WebSocketTransport({ server }),
-});
+const server = http.createServer(app);
+const transport = new WebSocketTransport({ server });
 
+const gameServer = new Server({ transport });
 gameServer.define("genie_world", GenieRoom);
 
-gameServer.listen(port).then(() => {
+// Let Colyseus attach its matchmaking routes to our express app
+gameServer.attach({ server, express: app });
+
+server.listen(port, () => {
   console.log(`🧞 Genies server listening on :${port}`);
 });
