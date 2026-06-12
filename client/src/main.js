@@ -220,3 +220,4 @@ new Phaser.Game({
   scene: [WorldScene],
   scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
 });
+
