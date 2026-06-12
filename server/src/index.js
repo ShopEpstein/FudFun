@@ -1,5 +1,6 @@
 const http = require("http");
 const express = require("express");
+const cors = require("cors");
 const { Server } = require("colyseus");
 const { WebSocketTransport } = require("@colyseus/ws-transport");
 const { GenieRoom } = require("./GenieRoom");
@@ -7,11 +8,7 @@ const { GenieRoom } = require("./GenieRoom");
 const port = Number(process.env.PORT || 2567);
 const app = express();
 
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
-  next();
-});
+app.use(cors());
 
 const server = http.createServer(app);
 
