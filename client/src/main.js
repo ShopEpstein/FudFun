@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { Client, getStateCallbacks } from "colyseus.js";
+import { Client } from "colyseus.js";
 
 // --- world constants (must match the server) ------------------------------
 const TILE_W = 64;
@@ -118,10 +118,8 @@ class WorldScene extends Phaser.Scene {
   }
 
   bindState() {
-    const $ = getStateCallbacks(this.room);
-
     // --- players ---
-    $(this.room.state).players.onAdd((player, id) => {
+    this.room.state.players.onAdd((player, id) => {
       const g = this.makeGenie(player.skin, player.name);
       this.placeAt(g, player.x, player.y);
       if (id === this.room.sessionId) {
@@ -129,32 +127,32 @@ class WorldScene extends Phaser.Scene {
         this.mx = player.x;
         this.my = player.y;
         this.cameras.main.startFollow(g, true, 0.12, 0.12);
-        $(player).inv.onChange(() => this.updateHud(player.inv));
+        player.inv.onChange(() => this.updateHud(player.inv));
       } else {
         this.others.set(id, { g, tx: player.x, ty: player.y });
       }
-      $(player).onChange(() => {
+      player.onChange(() => {
         if (id === this.room.sessionId) return;
         const o = this.others.get(id);
         if (o) { o.tx = player.x; o.ty = player.y; }
       });
     });
-    $(this.room.state).players.onRemove((_p, id) => {
+    this.room.state.players.onRemove((_p, id) => {
       const o = this.others.get(id);
       if (o) { o.g.destroy(); this.others.delete(id); }
     });
 
     // --- resource nodes ---
-    $(this.room.state).nodes.onAdd((node, id) => {
+    this.room.state.nodes.onAdd((node, id) => {
       const c = this.makeNode(node.kind);
       this.placeAt(c, node.x, node.y);
       this.nodeGfx.set(id, { c, node });
-      $(node).onChange(() => {
+      node.onChange(() => {
         c.setVisible(node.amount > 0);
         c.gem.setScale(0.55 + 0.09 * node.amount);
       });
     });
-    $(this.room.state).nodes.onRemove((_n, id) => {
+    this.room.state.nodes.onRemove((_n, id) => {
       const g = this.nodeGfx.get(id);
       if (g) { g.c.destroy(); this.nodeGfx.delete(id); }
     });
