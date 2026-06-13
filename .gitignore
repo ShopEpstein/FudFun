@@ -1,5 +1,6 @@
-node_modules/
-dist/
+.colyseus-cloud.json
 .env
 .env.local
-.colyseus-cloud.json
+dist/
+node_modules/
+server/.colyseus-cloud.json
