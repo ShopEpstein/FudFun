@@ -14,13 +14,14 @@ app.use(express.json());
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
-const transport = new WebSocketTransport({ server });
 
-const gameServer = new Server({ transport });
+// Creating the Server with this transport binds the WebSocket upgrade handler
+// and matchmaking routes to `server` exactly once. Calling gameServer.attach()
+// as well would bind a second upgrade handler to the same socket, which makes
+// ws throw "handleUpgrade() was called more than once" and silently kills the
+// room connection — the client joins but never receives state.
+const gameServer = new Server({ transport: new WebSocketTransport({ server }) });
 gameServer.define("genie_world", GenieRoom);
-
-// Let Colyseus attach its matchmaking routes to our express app
-gameServer.attach({ server, express: app });
 
 server.listen(port, () => {
   console.log(`🧞 Genies server listening on :${port}`);
