@@ -9,9 +9,3 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: APPWRITE_ENDPOINT
-        sync: false
-      - key: APPWRITE_PROJECT
-        sync: false
-      - key: APPWRITE_KEY
-        sync: false
