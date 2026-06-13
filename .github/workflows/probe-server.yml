@@ -28,28 +28,37 @@ jobs:
             -d '{}' \
             --max-time 120 \
             https://fudfun-server.onrender.com/matchmake/joinOrCreate/genie_world || true
-      - name: WebSocket state sync (the real test)
+      - name: WebSocket state sync + two-client visibility (the real test)
         run: |
           npm init -y >/dev/null 2>&1
           npm install colyseus.js@0.15.19 >/dev/null 2>&1
           cat > ws-probe.mjs <<'EOF'
           import { Client } from "colyseus.js";
           const URL = "wss://fudfun-server.onrender.com";
+
+          async function join(name, pid) {
+            const room = await new Client(URL).joinOrCreate("genie_world", { name, pid });
+            const seen = new Set();
+            room.state.players.onAdd((p, id) => seen.add(id));
+            let nodes = 0;
+            room.state.nodes.onAdd(() => { nodes++; });
+            return { room, seen, nodes: () => nodes };
+          }
+
           // Retry to absorb Render redeploy + free-tier cold start.
           for (let attempt = 1; attempt <= 20; attempt++) {
             try {
-              const client = new Client(URL);
-              const room = await client.joinOrCreate("genie_world", { name: "ci-probe", pid: "ci-probe" });
-              let players = 0, nodes = 0;
-              room.state.players.onAdd(() => { players++; });
-              room.state.nodes.onAdd(() => { nodes++; });
+              const a = await join("ci-alice", "ci-alice");
+              await new Promise(r => setTimeout(r, 500));
+              const b = await join("ci-bob", "ci-bob");
               await new Promise(r => setTimeout(r, 3000));
-              await room.leave();
-              if (players >= 1 && nodes >= 1) {
-                console.log(`STATE_SYNC=ok players=${players} nodes=${nodes}`);
+              const aSees = a.seen.size, bSees = b.seen.size, nodes = a.nodes();
+              await a.room.leave(); await b.room.leave();
+              if (aSees >= 2 && bSees >= 2 && nodes >= 1) {
+                console.log(`STATE_SYNC=ok aliceSees=${aSees} bobSees=${bSees} nodes=${nodes}`);
                 process.exit(0);
               }
-              console.log(`attempt ${attempt}: joined but no state yet (players=${players} nodes=${nodes}); retrying`);
+              console.log(`attempt ${attempt}: joined but state incomplete (aliceSees=${aSees} bobSees=${bSees} nodes=${nodes}); retrying`);
             } catch (e) {
               console.log(`attempt ${attempt}: ${e?.message || e}; retrying`);
             }
