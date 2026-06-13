@@ -142,16 +142,23 @@ class WorldScene extends Phaser.Scene {
   }
 
   bindState() {
+    // In Colyseus 0.15 the initial state snapshot is applied before
+    // joinOrCreate resolves, so onAdd may never fire for players/nodes
+    // already present when we register. We guard with a seen-set and also
+    // call forEach so existing entries are always spawned exactly once.
+
     // --- players ---
-    this.room.state.players.onAdd((player, id) => {
-      console.log("[onAdd] player", id, player.name, "@", player.x, player.y, "me?", id === this.room.sessionId);
+    const seenPlayers = new Set();
+    const spawnPlayer = (player, id) => {
+      if (seenPlayers.has(id)) return;
+      seenPlayers.add(id);
+      console.log("[spawn] player", id, player.name, "@", player.x, player.y, "me?", id === this.room.sessionId);
       const g = this.makeGenie(player.skin, player.name);
       this.placeAt(g, player.x, player.y);
       if (id === this.room.sessionId) {
         this.me = g;
         this.mx = player.x;
         this.my = player.y;
-        // Snap camera to spawn position immediately, then smooth-follow.
         const { x, y } = iso(player.x, player.y);
         this.cameras.main.centerOn(x, y);
         this.cameras.main.startFollow(g, true, 0.12, 0.12);
@@ -165,15 +172,22 @@ class WorldScene extends Phaser.Scene {
         const o = this.others.get(id);
         if (o) { o.tx = player.x; o.ty = player.y; }
       });
-    });
+    };
+    this.room.state.players.onAdd((player, id) => spawnPlayer(player, id));
+    this.room.state.players.forEach((player, id) => spawnPlayer(player, id));
+
     this.room.state.players.onRemove((_p, id) => {
+      seenPlayers.delete(id);
       const o = this.others.get(id);
       if (o) { o.g.destroy(); this.others.delete(id); }
       this.updateStatus();
     });
 
     // --- resource nodes ---
-    this.room.state.nodes.onAdd((node, id) => {
+    const seenNodes = new Set();
+    const spawnNode = (node, id) => {
+      if (seenNodes.has(id)) return;
+      seenNodes.add(id);
       const c = this.makeNode(node.kind);
       this.placeAt(c, node.x, node.y);
       this.nodeGfx.set(id, { c, node });
@@ -181,8 +195,12 @@ class WorldScene extends Phaser.Scene {
         c.setVisible(node.amount > 0);
         c.gem.setScale(0.55 + 0.09 * node.amount);
       });
-    });
+    };
+    this.room.state.nodes.onAdd((node, id) => spawnNode(node, id));
+    this.room.state.nodes.forEach((node, id) => spawnNode(node, id));
+
     this.room.state.nodes.onRemove((_n, id) => {
+      seenNodes.delete(id);
       const g = this.nodeGfx.get(id);
       if (g) { g.c.destroy(); this.nodeGfx.delete(id); }
     });
