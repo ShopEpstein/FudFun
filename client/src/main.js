@@ -5,7 +5,11 @@ import { Client } from "colyseus.js";
 const TILE_W = 64;
 const TILE_H = 32;
 const WORLD = { w: 40, h: 40 };
-const SERVER = import.meta.env.VITE_SERVER || "ws://localhost:2567";
+const SERVER =
+  import.meta.env.VITE_SERVER ||
+  (location.hostname === "localhost" || location.hostname === "127.0.0.1"
+    ? "ws://localhost:2567"
+    : "wss://fudfun-server.onrender.com");
 
 // original placeholder art keys — swap for real genie-world art later
 const SKINS = [0x8a5bff, 0xff4d9d, 0x00e0ff, 0x7bff4d, 0xffc53d, 0xff5c5c];
