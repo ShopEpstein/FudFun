@@ -1,0 +1,30 @@
+name: Probe game server
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/elegant-dirac-b71xdn]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Health check
+        run: |
+          curl -sS -i --max-time 120 https://fudfun-server.onrender.com/healthz || true
+      - name: CORS preflight for matchmake
+        run: |
+          curl -sS -i -X OPTIONS \
+            -H "Origin: https://fud-fun.vercel.app" \
+            -H "Access-Control-Request-Method: POST" \
+            -H "Access-Control-Request-Headers: content-type" \
+            --max-time 120 \
+            https://fudfun-server.onrender.com/matchmake/joinOrCreate/genie_world || true
+      - name: Matchmake POST
+        run: |
+          curl -sS -i -X POST \
+            -H "Origin: https://fud-fun.vercel.app" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            --max-time 120 \
+            https://fudfun-server.onrender.com/matchmake/joinOrCreate/genie_world || true
