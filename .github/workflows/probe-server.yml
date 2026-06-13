@@ -28,3 +28,34 @@ jobs:
             -d '{}' \
             --max-time 120 \
             https://fudfun-server.onrender.com/matchmake/joinOrCreate/genie_world || true
+      - name: WebSocket state sync (the real test)
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install colyseus.js@0.15.19 >/dev/null 2>&1
+          cat > ws-probe.mjs <<'EOF'
+          import { Client } from "colyseus.js";
+          const URL = "wss://fudfun-server.onrender.com";
+          // Retry to absorb Render redeploy + free-tier cold start.
+          for (let attempt = 1; attempt <= 20; attempt++) {
+            try {
+              const client = new Client(URL);
+              const room = await client.joinOrCreate("genie_world", { name: "ci-probe", pid: "ci-probe" });
+              let players = 0, nodes = 0;
+              room.state.players.onAdd(() => { players++; });
+              room.state.nodes.onAdd(() => { nodes++; });
+              await new Promise(r => setTimeout(r, 3000));
+              await room.leave();
+              if (players >= 1 && nodes >= 1) {
+                console.log(`STATE_SYNC=ok players=${players} nodes=${nodes}`);
+                process.exit(0);
+              }
+              console.log(`attempt ${attempt}: joined but no state yet (players=${players} nodes=${nodes}); retrying`);
+            } catch (e) {
+              console.log(`attempt ${attempt}: ${e?.message || e}; retrying`);
+            }
+            await new Promise(r => setTimeout(r, 15000));
+          }
+          console.log("STATE_SYNC=failed");
+          process.exit(1);
+          EOF
+          node ws-probe.mjs
