@@ -11,41 +11,92 @@ const SERVER =
     ? "ws://localhost:2567"
     : "wss://fudfun-server.onrender.com");
 
-// original placeholder art keys — swap for real genie-world art later
 const SKINS = [0x8a5bff, 0xff4d9d, 0x00e0ff, 0x7bff4d, 0xffc53d, 0xff5c5c];
 const KIND = {
-  mana:  { color: 0x00e0ff, icon: "🔮" },
-  herb:  { color: 0x7bff4d, icon: "🌿" },
-  shard: { color: 0xff4d9d, icon: "💎" },
+  mana:  { color: 0x00e0ff, icon: "🔮", label: "Mana Crystal" },
+  herb:  { color: 0x7bff4d, icon: "🌿", label: "Wild Herb"    },
+  shard: { color: 0xff4d9d, icon: "💎", label: "Shard"        },
 };
+const KINDS_ORDER = ["mana", "herb", "shard"];
 
 const iso = (cx, cy) => ({ x: (cx - cy) * (TILE_W / 2), y: (cx + cy) * (TILE_H / 2) });
 
-// --- inventory HUD (DOM overlay) ------------------------------------------
+// --- shared panel style ---------------------------------------------------
+const PANEL =
+  "font-family:ui-monospace,monospace;color:#ecedf5;" +
+  "background:#101220ee;border:1px solid #ffffff22;" +
+  "border-radius:10px;backdrop-filter:blur(8px);";
+
+// --- mini-HUD (bottom-left, click to open inventory) ---------------------
 const hud = document.createElement("div");
 hud.style.cssText =
-  "position:fixed;left:12px;bottom:12px;z-index:10;font-family:ui-monospace,monospace;" +
-  "font-size:14px;color:#ecedf5;background:#101220cc;border:1px solid #ffffff22;" +
-  "border-radius:10px;padding:8px 12px;backdrop-filter:blur(8px)";
+  `position:fixed;left:12px;bottom:12px;z-index:10;${PANEL}` +
+  "font-size:14px;padding:8px 12px;cursor:pointer;user-select:none";
+hud.title = "I — inventory";
 hud.textContent = "inventory: empty";
 document.body.appendChild(hud);
 
-// --- connection status HUD ------------------------------------------------
+// --- inventory screen (modal) --------------------------------------------
+const invOverlay = document.createElement("div");
+invOverlay.style.cssText =
+  "position:fixed;inset:0;z-index:30;background:#00000077;" +
+  "display:none;align-items:center;justify-content:center;";
+document.body.appendChild(invOverlay);
+
+const invPanel = document.createElement("div");
+invPanel.style.cssText =
+  `${PANEL}padding:24px 32px;min-width:280px;max-width:420px;width:90vw;`;
+invOverlay.appendChild(invPanel);
+
+invPanel.innerHTML =
+  `<div style="font-size:18px;font-weight:bold;margin-bottom:16px;letter-spacing:.04em">Inventory</div>` +
+  `<div id="inv-rows"></div>` +
+  `<div style="margin-top:16px;font-size:11px;color:#ffffff44">` +
+  `[I] toggle &nbsp;·&nbsp; click outside to close &nbsp;·&nbsp; [Z] re-center camera</div>`;
+
+const invRows = invPanel.querySelector("#inv-rows");
+
+invPanel.addEventListener("click", e => e.stopPropagation());
+invOverlay.addEventListener("click", () => toggleInv(false));
+
+// --- status chip (top-right) ---------------------------------------------
 const statusHud = document.createElement("div");
 statusHud.style.cssText =
-  "position:fixed;right:12px;top:12px;z-index:10;font-family:ui-monospace,monospace;" +
-  "font-size:12px;color:#ecedf5;background:#101220cc;border:1px solid #ffffff22;" +
-  "border-radius:10px;padding:6px 10px;backdrop-filter:blur(8px)";
+  `position:fixed;right:12px;top:12px;z-index:10;${PANEL}font-size:12px;padding:6px 10px`;
 statusHud.textContent = "connecting…";
 document.body.appendChild(statusHud);
 
+// --- re-center button (appears when camera is free-roaming) --------------
+const recenterBtn = document.createElement("button");
+recenterBtn.style.cssText =
+  `position:fixed;bottom:12px;right:12px;z-index:10;${PANEL}` +
+  "font-size:12px;padding:6px 12px;cursor:pointer;border:1px solid #ffffff44;display:none";
+recenterBtn.textContent = "⊙ re-center  [Z]";
+document.body.appendChild(recenterBtn);
+
+// --- module-level helpers (need access to scene) -------------------------
+let _scene = null;
+
+function toggleInv(force) {
+  const open = force !== undefined ? force : invOverlay.style.display === "none";
+  invOverlay.style.display = open ? "flex" : "none";
+  if (_scene) _scene.invOpen = open;
+}
+
+hud.addEventListener("click", () => toggleInv());
+recenterBtn.addEventListener("click", () => _scene && _scene.recenterCamera());
+
+// --- scene ---------------------------------------------------------------
 class WorldScene extends Phaser.Scene {
   constructor() {
     super("world");
-    this.others = new Map();
-    this.nodeGfx = new Map();
+    this.others   = new Map();
+    this.nodeGfx  = new Map();
     this.lastStep = 0;
     this.nearNode = null;
+    this.invOpen  = false;
+    this.freeCamera = false;
+    _scene = this;
   }
 
   async create() {
@@ -53,15 +104,34 @@ class WorldScene extends Phaser.Scene {
     this.board = this.add.container(0, 0);
     this.drawGround();
 
-    this.cursors = this.input.keyboard.createCursorKeys();
-    this.keys = this.input.keyboard.addKeys("W,A,S,D");
+    this.cursors  = this.input.keyboard.createCursorKeys();
+    this.keys     = this.input.keyboard.addKeys("W,A,S,D");
     this.spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.iKey     = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.I);
+    this.zKey     = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Z);
+
+    // Suppress right-click context menu so right-drag pans the camera.
+    this.input.mouse.disableContextMenu();
+
+    // Right-click or middle-mouse drag → free-roam camera pan.
+    this.input.on("pointermove", (pointer) => {
+      if (!pointer.isDown) return;
+      if (!pointer.middleButtonDown() && !pointer.rightButtonDown()) return;
+      const dx = pointer.x - pointer.prevPosition.x;
+      const dy = pointer.y - pointer.prevPosition.y;
+      this.cameras.main.stopFollow();
+      this.cameras.main.scrollX -= dx / this.cameras.main.zoom;
+      this.cameras.main.scrollY -= dy / this.cameras.main.zoom;
+      if (!this.freeCamera) { this.freeCamera = true; recenterBtn.style.display = "block"; }
+    });
 
     const name = (window.prompt("Pick a genie name") || "genie").slice(0, 16);
 
-    // stable id so the server can restore your saved position + inventory
     let pid = localStorage.getItem("genie_pid");
-    if (!pid) { pid = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random()); localStorage.setItem("genie_pid", pid); }
+    if (!pid) {
+      pid = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random());
+      localStorage.setItem("genie_pid", pid);
+    }
 
     this.client = new Client(SERVER);
     try {
@@ -76,6 +146,13 @@ class WorldScene extends Phaser.Scene {
     }
     statusHud.textContent = "connected";
     this.bindState();
+  }
+
+  recenterCamera() {
+    if (!this.me) return;
+    this.cameras.main.startFollow(this.me, true, 0.12, 0.12);
+    this.freeCamera = false;
+    recenterBtn.style.display = "none";
   }
 
   drawGround() {
@@ -114,25 +191,41 @@ class WorldScene extends Phaser.Scene {
 
   placeAt(c, cx, cy) {
     const { x, y } = iso(cx, cy);
-    c.x = x;
-    c.y = y;
+    c.x = x; c.y = y;
     c.setDepth(y);
   }
 
   updateHud(inv) {
+    // mini-HUD line
     const parts = [];
     inv.forEach((count, kind) => {
       const k = KIND[kind] || { icon: "•" };
       if (count > 0) parts.push(`${k.icon} ${kind} ${count}`);
     });
     hud.textContent = parts.length ? parts.join("   ") : "inventory: empty";
+
+    // inventory screen rows
+    invRows.innerHTML = "";
+    KINDS_ORDER.forEach(kind => {
+      const k = KIND[kind];
+      const count = inv.get ? (inv.get(kind) || 0) : (inv[kind] || 0);
+      const row = document.createElement("div");
+      row.style.cssText =
+        "display:flex;align-items:center;gap:12px;padding:10px 0;" +
+        "border-bottom:1px solid #ffffff11;";
+      row.innerHTML =
+        `<span style="font-size:22px;width:28px;text-align:center">${k.icon}</span>` +
+        `<span style="flex:1;color:#ecedf5bb">${k.label}</span>` +
+        `<span style="font-size:16px;font-weight:bold;min-width:28px;text-align:right;` +
+        `color:${count > 0 ? "#ecedf5" : "#ffffff33"}">${count}</span>`;
+      invRows.appendChild(row);
+    });
   }
 
   floatText(c, txt, color) {
     const t = this.add
       .text(c.x, c.y - 50, txt, { fontFamily: "monospace", fontSize: "14px", color })
-      .setOrigin(0.5)
-      .setDepth(99999);
+      .setOrigin(0.5).setDepth(99999);
     this.tweens.add({ targets: t, y: t.y - 30, alpha: 0, duration: 700, onComplete: () => t.destroy() });
   }
 
@@ -142,17 +235,13 @@ class WorldScene extends Phaser.Scene {
   }
 
   bindState() {
-    // In Colyseus 0.15 the initial state snapshot is applied before
-    // joinOrCreate resolves, so onAdd may never fire for players/nodes
-    // already present when we register. We guard with a seen-set and also
-    // call forEach so existing entries are always spawned exactly once.
-
-    // --- players ---
+    // Colyseus 0.15: onAdd may not fire for items present in the initial
+    // snapshot. Use forEach as a fallback; seen-set prevents double-spawn.
     const seenPlayers = new Set();
     const spawnPlayer = (player, id) => {
       if (seenPlayers.has(id)) return;
       seenPlayers.add(id);
-      console.log("[spawn] player", id, player.name, "@", player.x, player.y, "me?", id === this.room.sessionId);
+      console.log("[spawn]", id, player.name, "@", player.x, player.y);
       const g = this.makeGenie(player.skin, player.name);
       this.placeAt(g, player.x, player.y);
       if (id === this.room.sessionId) {
@@ -162,6 +251,7 @@ class WorldScene extends Phaser.Scene {
         const { x, y } = iso(player.x, player.y);
         this.cameras.main.centerOn(x, y);
         this.cameras.main.startFollow(g, true, 0.12, 0.12);
+        this.updateHud(player.inv);
         player.inv.onChange(() => this.updateHud(player.inv));
       } else {
         this.others.set(id, { g, tx: player.x, ty: player.y });
@@ -173,8 +263,8 @@ class WorldScene extends Phaser.Scene {
         if (o) { o.tx = player.x; o.ty = player.y; }
       });
     };
-    this.room.state.players.onAdd((player, id) => spawnPlayer(player, id));
-    this.room.state.players.forEach((player, id) => spawnPlayer(player, id));
+    this.room.state.players.onAdd((p, id) => spawnPlayer(p, id));
+    this.room.state.players.forEach((p, id) => spawnPlayer(p, id));
 
     this.room.state.players.onRemove((_p, id) => {
       seenPlayers.delete(id);
@@ -183,7 +273,6 @@ class WorldScene extends Phaser.Scene {
       this.updateStatus();
     });
 
-    // --- resource nodes ---
     const seenNodes = new Set();
     const spawnNode = (node, id) => {
       if (seenNodes.has(id)) return;
@@ -196,8 +285,8 @@ class WorldScene extends Phaser.Scene {
         c.gem.setScale(0.55 + 0.09 * node.amount);
       });
     };
-    this.room.state.nodes.onAdd((node, id) => spawnNode(node, id));
-    this.room.state.nodes.forEach((node, id) => spawnNode(node, id));
+    this.room.state.nodes.onAdd((n, id) => spawnNode(n, id));
+    this.room.state.nodes.forEach((n, id) => spawnNode(n, id));
 
     this.room.state.nodes.onRemove((_n, id) => {
       seenNodes.delete(id);
@@ -207,13 +296,17 @@ class WorldScene extends Phaser.Scene {
   }
 
   update(time) {
-    // self movement: one tile per ~140ms, predicted locally, confirmed by server
-    if (this.me && time - this.lastStep > 140) {
+    // --- shortcuts ---
+    if (Phaser.Input.Keyboard.JustDown(this.iKey)) toggleInv();
+    if (Phaser.Input.Keyboard.JustDown(this.zKey)) this.recenterCamera();
+
+    // --- genie movement (blocked while inventory screen is open) ---
+    if (!this.invOpen && this.me && time - this.lastStep > 140) {
       let dx = 0, dy = 0, dir = null;
-      if (this.cursors.left.isDown || this.keys.A.isDown) { dx = -1; dir = "left"; }
-      else if (this.cursors.right.isDown || this.keys.D.isDown) { dx = 1; dir = "right"; }
-      else if (this.cursors.up.isDown || this.keys.W.isDown) { dy = -1; dir = "up"; }
-      else if (this.cursors.down.isDown || this.keys.S.isDown) { dy = 1; dir = "down"; }
+      if      (this.cursors.left.isDown  || this.keys.A.isDown) { dx = -1; dir = "left";  }
+      else if (this.cursors.right.isDown || this.keys.D.isDown) { dx =  1; dir = "right"; }
+      else if (this.cursors.up.isDown    || this.keys.W.isDown) { dy = -1; dir = "up";    }
+      else if (this.cursors.down.isDown  || this.keys.S.isDown) { dy =  1; dir = "down";  }
       if (dir) {
         const nx = Phaser.Math.Clamp(this.mx + dx, 0, WORLD.w - 1);
         const ny = Phaser.Math.Clamp(this.my + dy, 0, WORLD.h - 1);
@@ -226,7 +319,7 @@ class WorldScene extends Phaser.Scene {
       }
     }
 
-    // others glide toward their last server-confirmed tile
+    // --- other players glide toward server position ---
     this.others.forEach((o) => {
       const { x, y } = iso(o.tx, o.ty);
       o.g.x = Phaser.Math.Linear(o.g.x, x, 0.2);
@@ -234,7 +327,7 @@ class WorldScene extends Phaser.Scene {
       o.g.setDepth(o.g.y);
     });
 
-    // highlight an adjacent, non-empty node you can gather
+    // --- highlight adjacent gatherable node ---
     let near = null;
     if (this.me) {
       this.nodeGfx.forEach((g, id) => {
@@ -246,8 +339,8 @@ class WorldScene extends Phaser.Scene {
     }
     this.nearNode = near;
 
-    // gather on SPACE
-    if (this.nearNode && Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
+    // --- gather on SPACE ---
+    if (!this.invOpen && this.nearNode && Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
       const g = this.nodeGfx.get(this.nearNode);
       this.room.send("gather", { id: this.nearNode });
       if (g) this.floatText(this.me, "+1 " + (KIND[g.node.kind]?.icon || ""), "#ffe600");
@@ -263,4 +356,3 @@ new Phaser.Game({
   scene: [WorldScene],
   scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
 });
-
