@@ -20,6 +20,10 @@ const KIND = {
 const KINDS_ORDER = ["mana", "herb", "shard"];
 
 const iso = (cx, cy) => ({ x: (cx - cy) * (TILE_W / 2), y: (cx + cy) * (TILE_H / 2) });
+const isoInv = (wx, wy) => ({
+  cx: Math.round((wx / (TILE_W / 2) + wy / (TILE_H / 2)) / 2),
+  cy: Math.round((wy / (TILE_H / 2) - wx / (TILE_W / 2)) / 2),
+});
 
 // --- shared panel style ---------------------------------------------------
 const PANEL =
@@ -69,10 +73,19 @@ document.body.appendChild(statusHud);
 // --- re-center button (appears when camera is free-roaming) --------------
 const recenterBtn = document.createElement("button");
 recenterBtn.style.cssText =
-  `position:fixed;bottom:12px;right:12px;z-index:10;${PANEL}` +
+  `position:fixed;bottom:72px;right:12px;z-index:10;${PANEL}` +
   "font-size:12px;padding:6px 12px;cursor:pointer;border:1px solid #ffffff44;display:none";
 recenterBtn.textContent = "⊙ re-center  [Z]";
 document.body.appendChild(recenterBtn);
+
+// --- gather button (bottom-center, shown when adjacent to a node) --------
+const gatherBtn = document.createElement("button");
+gatherBtn.textContent = "⛏ Gather";
+gatherBtn.style.cssText =
+  `position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:10;${PANEL}` +
+  "font-size:16px;padding:10px 28px;min-height:48px;min-width:120px;" +
+  "cursor:pointer;border:1px solid #8a5bff88;display:none;touch-action:manipulation";
+document.body.appendChild(gatherBtn);
 
 // --- module-level helpers (need access to scene) -------------------------
 let _scene = null;
@@ -90,12 +103,13 @@ recenterBtn.addEventListener("click", () => _scene && _scene.recenterCamera());
 class WorldScene extends Phaser.Scene {
   constructor() {
     super("world");
-    this.others   = new Map();
-    this.nodeGfx  = new Map();
-    this.lastStep = 0;
-    this.nearNode = null;
-    this.invOpen  = false;
-    this.freeCamera = false;
+    this.others      = new Map();
+    this.nodeGfx     = new Map();
+    this.lastStep    = 0;
+    this.nearNode    = null;
+    this.invOpen     = false;
+    this.freeCamera  = false;
+    this.touchTarget = null;
     _scene = this;
   }
 
@@ -123,6 +137,21 @@ class WorldScene extends Phaser.Scene {
       this.cameras.main.scrollX -= dx / this.cameras.main.zoom;
       this.cameras.main.scrollY -= dy / this.cameras.main.zoom;
       if (!this.freeCamera) { this.freeCamera = true; recenterBtn.style.display = "block"; }
+    });
+
+    // Tap-to-move: left-click / touch on the game canvas.
+    this.input.on("pointerdown", (ptr) => {
+      if (!this.me || ptr.rightButtonDown() || ptr.middleButtonDown()) return;
+      let { cx, cy } = isoInv(ptr.worldX, ptr.worldY);
+      cx = Phaser.Math.Clamp(cx, 0, WORLD.w - 1);
+      cy = Phaser.Math.Clamp(cy, 0, WORLD.h - 1);
+      this.touchTarget = { cx, cy };
+    });
+
+    // Gather button tap.
+    gatherBtn.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      this.doGather();
     });
 
     const name = (window.prompt("Pick a genie name") || "genie").slice(0, 16);
@@ -196,7 +225,6 @@ class WorldScene extends Phaser.Scene {
   }
 
   updateHud(inv) {
-    // mini-HUD line
     const parts = [];
     inv.forEach((count, kind) => {
       const k = KIND[kind] || { icon: "•" };
@@ -204,7 +232,6 @@ class WorldScene extends Phaser.Scene {
     });
     hud.textContent = parts.length ? parts.join("   ") : "inventory: empty";
 
-    // inventory screen rows
     invRows.innerHTML = "";
     KINDS_ORDER.forEach(kind => {
       const k = KIND[kind];
@@ -235,8 +262,6 @@ class WorldScene extends Phaser.Scene {
   }
 
   bindState() {
-    // Colyseus 0.15: onAdd may not fire for items present in the initial
-    // snapshot. Use forEach as a fallback; seen-set prevents double-spawn.
     const seenPlayers = new Set();
     const spawnPlayer = (player, id) => {
       if (seenPlayers.has(id)) return;
@@ -295,18 +320,31 @@ class WorldScene extends Phaser.Scene {
     });
   }
 
+  doGather() {
+    if (!this.nearNode) return;
+    const g = this.nodeGfx.get(this.nearNode);
+    this.room.send("gather", { id: this.nearNode });
+    if (g) this.floatText(this.me, "+1 " + (KIND[g.node.kind]?.icon || ""), "#ffe600");
+  }
+
   update(time) {
-    // --- shortcuts ---
     if (Phaser.Input.Keyboard.JustDown(this.iKey)) toggleInv();
     if (Phaser.Input.Keyboard.JustDown(this.zKey)) this.recenterCamera();
 
-    // --- genie movement (blocked while inventory screen is open) ---
     if (!this.invOpen && this.me && time - this.lastStep > 140) {
       let dx = 0, dy = 0, dir = null;
       if      (this.cursors.left.isDown  || this.keys.A.isDown) { dx = -1; dir = "left";  }
       else if (this.cursors.right.isDown || this.keys.D.isDown) { dx =  1; dir = "right"; }
       else if (this.cursors.up.isDown    || this.keys.W.isDown) { dy = -1; dir = "up";    }
       else if (this.cursors.down.isDown  || this.keys.S.isDown) { dy =  1; dir = "down";  }
+
+      if (!dir && this.touchTarget) {
+        const { cx: tx, cy: ty } = this.touchTarget;
+        if      (tx !== this.mx) { dx = tx > this.mx ? 1 : -1; dir = dx > 0 ? "right" : "left"; }
+        else if (ty !== this.my) { dy = ty > this.my ? 1 : -1; dir = dy > 0 ? "down"  : "up";   }
+        else                     { this.touchTarget = null; }
+      }
+
       if (dir) {
         const nx = Phaser.Math.Clamp(this.mx + dx, 0, WORLD.w - 1);
         const ny = Phaser.Math.Clamp(this.my + dy, 0, WORLD.h - 1);
@@ -319,7 +357,6 @@ class WorldScene extends Phaser.Scene {
       }
     }
 
-    // --- other players glide toward server position ---
     this.others.forEach((o) => {
       const { x, y } = iso(o.tx, o.ty);
       o.g.x = Phaser.Math.Linear(o.g.x, x, 0.2);
@@ -327,7 +364,6 @@ class WorldScene extends Phaser.Scene {
       o.g.setDepth(o.g.y);
     });
 
-    // --- highlight adjacent gatherable node ---
     let near = null;
     if (this.me) {
       this.nodeGfx.forEach((g, id) => {
@@ -338,12 +374,10 @@ class WorldScene extends Phaser.Scene {
       });
     }
     this.nearNode = near;
+    gatherBtn.style.display = (near && !this.invOpen) ? "block" : "none";
 
-    // --- gather on SPACE ---
     if (!this.invOpen && this.nearNode && Phaser.Input.Keyboard.JustDown(this.spaceKey)) {
-      const g = this.nodeGfx.get(this.nearNode);
-      this.room.send("gather", { id: this.nearNode });
-      if (g) this.floatText(this.me, "+1 " + (KIND[g.node.kind]?.icon || ""), "#ffe600");
+      this.doGather();
     }
   }
 }
