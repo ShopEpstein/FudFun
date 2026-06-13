@@ -30,6 +30,15 @@ hud.style.cssText =
 hud.textContent = "inventory: empty";
 document.body.appendChild(hud);
 
+// --- connection status HUD ------------------------------------------------
+const statusHud = document.createElement("div");
+statusHud.style.cssText =
+  "position:fixed;right:12px;top:12px;z-index:10;font-family:ui-monospace,monospace;" +
+  "font-size:12px;color:#ecedf5;background:#101220cc;border:1px solid #ffffff22;" +
+  "border-radius:10px;padding:6px 10px;backdrop-filter:blur(8px)";
+statusHud.textContent = "connecting…";
+document.body.appendChild(statusHud);
+
 class WorldScene extends Phaser.Scene {
   constructor() {
     super("world");
@@ -65,6 +74,7 @@ class WorldScene extends Phaser.Scene {
         .setScrollFactor(0);
       return;
     }
+    statusHud.textContent = "connected";
     this.bindState();
   }
 
@@ -126,20 +136,30 @@ class WorldScene extends Phaser.Scene {
     this.tweens.add({ targets: t, y: t.y - 30, alpha: 0, duration: 700, onComplete: () => t.destroy() });
   }
 
+  updateStatus() {
+    const n = this.room ? this.room.state.players.size : 0;
+    statusHud.textContent = `🧞 ${n} genie${n !== 1 ? "s" : ""}`;
+  }
+
   bindState() {
     // --- players ---
     this.room.state.players.onAdd((player, id) => {
+      console.log("[onAdd] player", id, player.name, "@", player.x, player.y, "me?", id === this.room.sessionId);
       const g = this.makeGenie(player.skin, player.name);
       this.placeAt(g, player.x, player.y);
       if (id === this.room.sessionId) {
         this.me = g;
         this.mx = player.x;
         this.my = player.y;
+        // Snap camera to spawn position immediately, then smooth-follow.
+        const { x, y } = iso(player.x, player.y);
+        this.cameras.main.centerOn(x, y);
         this.cameras.main.startFollow(g, true, 0.12, 0.12);
         player.inv.onChange(() => this.updateHud(player.inv));
       } else {
         this.others.set(id, { g, tx: player.x, ty: player.y });
       }
+      this.updateStatus();
       player.onChange(() => {
         if (id === this.room.sessionId) return;
         const o = this.others.get(id);
@@ -149,6 +169,7 @@ class WorldScene extends Phaser.Scene {
     this.room.state.players.onRemove((_p, id) => {
       const o = this.others.get(id);
       if (o) { o.g.destroy(); this.others.delete(id); }
+      this.updateStatus();
     });
 
     // --- resource nodes ---
